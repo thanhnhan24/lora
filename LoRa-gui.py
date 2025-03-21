@@ -16,11 +16,45 @@ import socket
 import threading
 import datetime
 
+class NetworkSenderThread(QThread):
+    """Luồng phụ để gửi dữ liệu qua mạng LAN"""
+    def __init__(self, ip, port=12346):
+        super().__init__()
+        self.ip = ip
+        self.port = port
+        self.client_socket = None
+        self.running = True
+
+    def run(self):
+        """Thiết lập kết nối TCP giữ nguyên"""
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((self.ip, self.port))
+        except Exception as e:
+            print(f"Lỗi kết nối đến server: {e}")
+            self.client_socket = None
+
+    def send_data(self, message):
+        """Gửi dữ liệu qua kết nối TCP đã mở"""
+        if self.client_socket:
+            try:
+                self.client_socket.sendall(message.encode('utf-8'))
+            except Exception as e:
+                print(f"Lỗi gửi dữ liệu: {e}")
+
+    def stop(self):
+        """Đóng kết nối khi kết thúc"""
+        self.running = False
+        if self.client_socket:
+            self.client_socket.close()
+            self.client_socket = None
+
+
 class TCPClientThread(QThread):
     data_received = Signal(str)
     connection_lost = Signal(str)
 
-    def __init__(self, ip, port=5000):
+    def __init__(self, ip, port=12345):
         super().__init__()
         self.ip = ip
         self.port = port
@@ -28,17 +62,36 @@ class TCPClientThread(QThread):
         self.client_socket = None
 
     def run(self):
+        """Kết nối và nhận dữ liệu từ server"""
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.ip, self.port))
+            self.data_received.emit("Kết nối thành công!")
+
             while self.running:
-                data = self.client_socket.recv(1024)
-                if data:
-                    self.data_received.emit(data.decode('utf-8'))
+                try:
+                    data = self.client_socket.recv(1024)
+                    if data:
+                        self.data_received.emit(data.decode('utf-8'))
+                except Exception as e:
+                    self.data_received.emit(f"Lỗi nhận dữ liệu: {str(e)}")
+                    break
+
         except Exception as e:
-            self.data_received.emit(f"Error: {str(e)}")
+            self.data_received.emit(f"Lỗi kết nối: {str(e)}")
+        finally:
+            self.connection_lost.emit("Mất kết nối đến server.")
+
+    def send_data(self, message):
+        """Gửi dữ liệu đến server"""
+        if self.client_socket:
+            try:
+                self.client_socket.sendall(message.encode('utf-8'))
+            except Exception as e:
+                self.data_received.emit(f"Lỗi gửi dữ liệu: {str(e)}")
 
     def stop(self):
+        """Dừng luồng và đóng kết nối"""
         self.running = False
         if self.client_socket:
             self.client_socket.close()
@@ -57,6 +110,7 @@ class ClockThread(QThread):
 class Ui_MainWindow(object):
     def __init__(self):
         self.tcp_thread = None
+        self.sender_thread = None
         self.clock_thread = ClockThread()
         self.clock_thread.time_updated.connect(self.time_updated)
         self.clock_thread.start()
@@ -78,16 +132,42 @@ class Ui_MainWindow(object):
             if self.tcp_thread:
                 self.tcp_thread.stop()
                 self.tcp_thread.wait()
-
+            self.sender_thread = NetworkSenderThread(ip)
             self.tcp_thread = TCPClientThread(ip)
             self.tcp_thread.data_received.connect(self.display_received_data)
+            self.contactor_on.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},1,1") )
+            self.contactor_off.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},1,0"))
+            self.light_on.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},2,1"))
+            self.light_off.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},2,0"))
+            self.socket_on.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},3,1"))
+            self.socket_off.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},3,0"))
+            self.projector_on.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},4,1"))
+            self.projector_off.clicked.connect(lambda: self.sender_thread.send_data(f"{self.tabWidget.currentIndex()},4,0"))
+            self.sender_thread.start()
             self.tcp_thread.start()
             self.update_log(f"Connecting to {ip}...")
         except Exception as e:
             self.update_log(f"Error: {str(e)}")
 
     def display_received_data(self, data):
-        self.update_log(f"Received: {data}")
+        raw_data = None
+        #self.update_log(f"Received: {data[5:]}")
+        if(data[5] == '2'):
+            raw_data = str(data[7:]).strip().split(',')
+            self.temprature2.setPlainText(raw_data[1] + " °C")
+            self.humidity2.setPlainText(raw_data[2] + " %")
+            self.uv2.setPlainText(raw_data[4] + " mW/m^2")
+            self.gas2.setPlainText(raw_data[6] + " ppm")
+            self.rssi2.setPlainText(raw_data[7] + " dBm")
+            self.update_log("Update Node 2")
+        elif(data[5] == '1'):
+            raw_data = str(data[7:]).strip().split(',')
+            self.temprature1.setPlainText(raw_data[1] + " °C")
+            self.humidity1.setPlainText(raw_data[2] + " %")
+            self.uv1.setPlainText(raw_data[4] + " mW/m^2")
+            self.gas1.setPlainText(raw_data[6] + " ppm")
+            self.rssi1.setPlainText(raw_data[7] + " dBm")
+            self.update_log("Update Node 1")
 
     def update_log(self, message):
         now = datetime.datetime.now()
@@ -246,39 +326,39 @@ class Ui_MainWindow(object):
         self.groupBox_14 = QGroupBox(self.tab_2)
         self.groupBox_14.setObjectName(u"groupBox_14")
         self.groupBox_14.setGeometry(QRect(530, 10, 240, 91))
-        self.plainTextEdit_12 = QPlainTextEdit(self.groupBox_14)
-        self.plainTextEdit_12.setObjectName(u"plainTextEdit_12")
-        self.plainTextEdit_12.setGeometry(QRect(10, 30, 221, 51))
+        self.uv2 = QPlainTextEdit(self.groupBox_14)
+        self.uv2.setObjectName(u"plainTextEdit_12")
+        self.uv2.setGeometry(QRect(10, 30, 221, 51))
         self.groupBox_15 = QGroupBox(self.tab_2)
         self.groupBox_15.setObjectName(u"groupBox_15")
         self.groupBox_15.setGeometry(QRect(270, 110, 241, 91))
-        self.plainTextEdit_13 = QPlainTextEdit(self.groupBox_15)
-        self.plainTextEdit_13.setObjectName(u"plainTextEdit_13")
-        self.plainTextEdit_13.setGeometry(QRect(10, 30, 221, 51))
+        self.power_consumtion2 = QPlainTextEdit(self.groupBox_15)
+        self.power_consumtion2.setObjectName(u"plainTextEdit_13")
+        self.power_consumtion2.setGeometry(QRect(10, 30, 221, 51))
         self.groupBox_16 = QGroupBox(self.tab_2)
         self.groupBox_16.setObjectName(u"groupBox_16")
         self.groupBox_16.setGeometry(QRect(530, 110, 241, 91))
-        self.plainTextEdit_14 = QPlainTextEdit(self.groupBox_16)
-        self.plainTextEdit_14.setObjectName(u"plainTextEdit_14")
-        self.plainTextEdit_14.setGeometry(QRect(10, 30, 221, 51))
+        self.rssi2 = QPlainTextEdit(self.groupBox_16)
+        self.rssi2.setObjectName(u"plainTextEdit_14")
+        self.rssi2.setGeometry(QRect(10, 30, 221, 51))
         self.groupBox_17 = QGroupBox(self.tab_2)
         self.groupBox_17.setObjectName(u"groupBox_17")
         self.groupBox_17.setGeometry(QRect(270, 10, 240, 91))
-        self.plainTextEdit_15 = QPlainTextEdit(self.groupBox_17)
-        self.plainTextEdit_15.setObjectName(u"plainTextEdit_15")
-        self.plainTextEdit_15.setGeometry(QRect(10, 30, 221, 51))
+        self.humidity2 = QPlainTextEdit(self.groupBox_17)
+        self.humidity2.setObjectName(u"plainTextEdit_15")
+        self.humidity2.setGeometry(QRect(10, 30, 221, 51))
         self.groupBox_18 = QGroupBox(self.tab_2)
         self.groupBox_18.setObjectName(u"groupBox_18")
         self.groupBox_18.setGeometry(QRect(10, 110, 241, 91))
-        self.plainTextEdit_6 = QPlainTextEdit(self.groupBox_18)
-        self.plainTextEdit_6.setObjectName(u"plainTextEdit_6")
-        self.plainTextEdit_6.setGeometry(QRect(10, 30, 221, 51))
+        self.gas2 = QPlainTextEdit(self.groupBox_18)
+        self.gas2.setObjectName(u"plainTextEdit_6")
+        self.gas2.setGeometry(QRect(10, 30, 221, 51))
         self.groupBox_19 = QGroupBox(self.tab_2)
         self.groupBox_19.setObjectName(u"groupBox_19")
         self.groupBox_19.setGeometry(QRect(10, 10, 240, 91))
-        self.plainTextEdit_7 = QPlainTextEdit(self.groupBox_19)
-        self.plainTextEdit_7.setObjectName(u"plainTextEdit_7")
-        self.plainTextEdit_7.setGeometry(QRect(10, 30, 221, 51))
+        self.temprature2 = QPlainTextEdit(self.groupBox_19)
+        self.temprature2.setObjectName(u"plainTextEdit_7")
+        self.temprature2.setGeometry(QRect(10, 30, 221, 51))
         self.log_output = QListView(self.centralwidget)
         self.log_output.setObjectName(u"listView")
         self.log_output.setGeometry(QRect(530, 530, 891, 221))
